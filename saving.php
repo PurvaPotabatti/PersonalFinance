@@ -1,49 +1,87 @@
 <?php
 session_start();
-$host = 'localhost';
-$db = 'finance_manager';
-$user = 'root';
-$pass = '';
-$port = 3307;
+// Load Composer dependencies and the custom connection class
+require __DIR__ . '/vendor/autoload.php';
 
-$conn = new mysqli($host, $user, $pass, $db, $port);
-if ($conn->connect_error) {
-    die("Connection failed: " . $conn->connect_error);
+use App\Database\MongoDBClient;
+use MongoDB\BSON\ObjectId;
+
+// --- INITIALIZATION ---
+// Get user ID from session. Based on the SQL dump, user_id is an integer.
+$user_id = (int)($_SESSION['user_id'] ?? 58063); // Use a realistic dummy ID for testing
+
+// Get the MongoDB collection handler
+try {
+    $savingsCollection = MongoDBClient::getCollection('savings');
+    $message = '';
+} catch (Exception $e) {
+    die("<div class='alert alert-danger'>Connection Error: " . htmlspecialchars($e->getMessage()) . "</div>");
 }
 
-$user_id = $_SESSION['user_id'] ?? 1;
+// --- CRUD OPERATIONS ---
+if ($_SERVER["REQUEST_METHOD"] == "POST" && isset($_POST['action'])) {
+    $action = $_POST['action'];
+    $type = $_POST['type'] ?? 'static'; // Default to static if not set
 
-if ($_SERVER["REQUEST_METHOD"] == "POST") {
-    // Add Saving
-    $type = $_POST['type'] ?? '';
-    $amount = $_POST['amount'] ?? 0;
-    $name = $_POST['name'] ?? '';
+    if ($action === 'add') {
+        $name = trim($_POST['name']);
+        $amount = floatval($_POST['amount']);
 
-    if (!empty($type) && !empty($name) && $amount > 0) {
-        $stmt = $conn->prepare("INSERT INTO Savings (user_id, type, name, amount) VALUES (?, ?, ?, ?)");
-        $stmt->bind_param("issd", $user_id, $type, $name, $amount);
-        $stmt->execute();
-        $stmt->close();
+        if (!empty($name) && $amount > 0) {
+            $document = [
+                'user_id' => $user_id,
+                'type' => $type,
+                'name' => $name,
+                'amount' => $amount,
+                'created_at' => new \MongoDB\BSON\UTCDateTime()
+            ];
+
+            $savingsCollection->insertOne($document);
+            $message = ucfirst($type) . " saving goal added successfully.";
+        } else {
+            $message = "Error: Invalid name or amount.";
+        }
+    } 
+    elseif ($action === 'delete' && isset($_POST['id'])) {
+        $id = $_POST['id'];
+        
+        // Use the ID (which is the MongoDB ObjectId string) for deletion
+        $deleteResult = $savingsCollection->deleteOne([
+            '_id' => new ObjectId($id),
+            'user_id' => $user_id
+        ]);
+        
+        if ($deleteResult->getDeletedCount() === 1) {
+            $message = "Savings record deleted successfully.";
+        } else {
+            $message = "Error: Record not found or access denied.";
+        }
     }
-
-    // Delete Saving
-if (isset($_POST['delete_id'])) {
-    $id = $_POST['delete_id'];
-    $stmt = $conn->prepare("DELETE FROM Savings WHERE id = ? AND user_id = ?");
-    $stmt->bind_param("ii", $id, $user_id);
-    $stmt->execute();
-    $stmt->close();
+    
+    // Redirect to prevent form resubmission and clear post data
+    header("Location: saving.php");
+    exit();
 }
 
+// --- READ OPERATION (Fetch Data for Display) ---
+// Find all savings documents for the current user
+$savingsDocuments = $savingsCollection->find(['user_id' => $user_id]);
 
+// Separate into static and dynamic savings for display
+$staticSavings = [];
+$dynamicSavings = [];
+$total_static = 0;
+$total_dynamic = 0;
+
+foreach ($savingsDocuments as $doc) {
+    if ($doc['type'] === 'static') {
+        $staticSavings[] = $doc;
+        $total_static += (float)$doc['amount'];
+    } elseif ($doc['type'] === 'dynamic') {
+        $dynamicSavings[] = $doc;
+        $total_dynamic += (float)$doc['amount'];
+    }
 }
-
-$staticSavings = $conn->query("SELECT * FROM Savings WHERE user_id = '$user_id' AND type = 'static'");
-$dynamicSavings = $conn->query("SELECT * FROM Savings WHERE user_id = '$user_id' AND type = 'dynamic'");
-
-$totalResult = $conn->query("SELECT SUM(amount) AS total FROM Savings WHERE user_id = '$user_id'");
-$totalRow = $totalResult->fetch_assoc();
-$totalSavings = $totalRow['total'] ?? 0;
 ?>
 
 <!DOCTYPE html>
@@ -52,146 +90,135 @@ $totalSavings = $totalRow['total'] ?? 0;
   <meta charset="UTF-8">
   <title>Savings Manager</title>
   <link href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.0/dist/css/bootstrap.min.css" rel="stylesheet">
-  <link href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.0.0/css/all.min.css" rel="stylesheet">
   <style>
     body {
-      background: linear-gradient(to right, #e0f7fa, #f1f8e9);
+      background: linear-gradient(to bottom, #fff8e1, #e3f2fd);
       font-family: 'Segoe UI', sans-serif;
+      color: #333;
     }
     .dashboard-card {
-      background: white;
-      border-radius: 24px;
-      padding: 50px;
-      box-shadow: 0 10px 30px rgba(0,0,0,0.1);
-      margin-top: 60px;
+      background: #ffffff;
+      border-radius: 20px;
+      padding: 40px;
+      box-shadow: 0 8px 20px rgba(0, 0, 0, 0.1);
+      margin-top: 50px;
     }
     .section-title {
-      font-size: 32px;
-      font-weight: 800;
-      color: #2c3e50;
-      margin-bottom: 30px;
-    }
-    .form-label {
+      font-size: 28px;
       font-weight: 600;
-      color: #37474f;
-    }
-    .table th {
-      background-color: #f1f3f4;
-    }
-    .icon-title {
-      font-size: 40px;
+      margin-bottom: 30px;
       color: #f9a825;
-      margin-bottom: 10px;
     }
-    .total-banner {
-      background: #fff8e1;
-      border-left: 8px solid #f9a825;
-      padding: 20px;
-      font-size: 20px;
-      font-weight: bold;
-      margin-bottom: 20px;
-      color: #bf360c;
-      border-radius: 12px;
+    .form-area {
+      background: #fefefe;
+      border-radius: 16px;
+      padding: 25px;
+      box-shadow: 0 6px 12px rgba(0,0,0,0.05);
+      margin-top: 30px;
     }
+    th { background-color: #fce4ec; }
+    .table-data { font-size: 0.95rem; }
+    .total-row { font-weight: bold; background-color: #ffe0b2; }
   </style>
 </head>
 <body>
-<div class="container">
-  <div class="dashboard-card text-center">
-    <div class="icon-title"><i class="fas fa-piggy-bank"></i></div>
-    <div class="section-title">Savings Manager</div>
 
-    <!-- Total Savings Banner -->
-    <div class="total-banner text-start">
-      🐖 Total Savings: ₹ <?= number_format($totalSavings, 2) ?>
-    </div>
+<div class="container">
+  <div class="dashboard-card">
+    <div class="section-title text-center">💸 Savings Manager (MongoDB)</div>
+
+    <?php if (!empty($message)): ?>
+      <div class="alert alert-success"><?= htmlspecialchars($message) ?></div>
+    <?php endif; ?>
 
     <!-- Add Savings Form -->
-    <form method="POST" class="text-start mb-5">
-      <div class="row">
-        <div class="col-md-4 mb-3">
-          <label class="form-label">Saving Type (static/dynamic)</label>
-          <input type="text" class="form-control" name="type" placeholder="e.g. static" required>
+    <div class="form-area">
+      <h5 class="mb-3 text-secondary">➕ Add New Savings Goal</h5>
+      <form method="POST" class="row g-3">
+        <input type="hidden" name="action" value="add">
+        
+        <div class="col-md-4">
+          <label class="form-label">Type</label>
+          <select name="type" class="form-select" required>
+            <option value="static">Static (Fixed Goals/Investments)</option>
+            <option value="dynamic">Dynamic (Flexible Savings)</option>
+          </select>
         </div>
-        <div class="col-md-4 mb-3">
-          <label class="form-label">Saving Name</label>
-          <input type="text" class="form-control" name="name" placeholder="e.g. LIC, FD" required>
+
+        <div class="col-md-4">
+          <label class="form-label">Goal/Source Name</label>
+          <input type="text" class="form-control" name="name" placeholder="e.g., FD, Car Down Payment" required>
         </div>
-        <div class="col-md-4 mb-3">
+        
+        <div class="col-md-2">
           <label class="form-label">Amount (₹)</label>
           <input type="number" step="0.01" class="form-control" name="amount" required>
         </div>
-      </div>
-      <button type="submit" class="btn btn-success">➕ Add Saving</button>
-      <br><br><br>
-        <div class="text-start mb-3">
-      <a href="dashboard.php" class="btn btn-outline-primary btn-main">
-        ⬅ Back to Dashboard
-      </a>
+        
+        <div class="col-md-2 d-flex align-items-end">
+          <button type="submit" class="btn btn-warning w-100 text-white">💾 Record Saving</button>
+        </div>
+      </form>
     </div>
-    </form>
 
-    <!-- Static Savings Table -->
-    <h5 class="mb-3 text-start">📌 Static Savings</h5>
-    <table class="table table-bordered text-start">
-      <thead>
-        <tr>
-          <th>Type</th>
-          <th>Name</th>
-          <th>Amount (₹)</th>
-          <th>Action</th>
-        </tr>
-      </thead>
-      <tbody>
-        <?php while($row = $staticSavings->fetch_assoc()): ?>
-        <tr>
-          <td><?= htmlspecialchars($row['type']) ?></td>
-          <td><?= htmlspecialchars($row['name']) ?></td>
-          <td><?= htmlspecialchars($row['amount']) ?></td>
-          <td>
-            <form method="POST" style="display:inline;">
-              <input type="hidden" name="delete_id" value="<?= $row['id'] ?>">
-              <button type="submit" class="btn btn-danger btn-sm">🗑 Delete</button>
-            </form>
-          </td>
-        </tr>
-        <?php endwhile; ?>
-      </tbody>
-    </table>
+    <!-- Savings Tables -->
+    <div class="row mt-5">
+      <div class="col-md-6">
+        <h5 class="text-center text-secondary">Static Savings (Fixed)</h5>
+        <table class="table table-bordered table-hover table-data">
+          <thead>
+            <tr><th>Name</th><th>Amount (₹)</th><th>Actions</th></tr>
+          </thead>
+          <tbody>
+            <?php foreach ($staticSavings as $doc): ?>
+            <tr>
+              <td><?= htmlspecialchars($doc['name']) ?></td>
+              <td><?= number_format($doc['amount'], 2) ?></td>
+              <td>
+                <form method="POST" class="d-inline">
+                  <input type="hidden" name="action" value="delete">
+                  <input type="hidden" name="id" value="<?= $doc['_id'] ?>">
+                  <input type="hidden" name="type" value="static">
+                  <button class="btn btn-sm btn-danger" onclick="return confirm('Delete this static saving goal?')">🗑️</button>
+                </form>
+              </td>
+            </tr>
+            <?php endforeach; ?>
+            <tr class="total-row"><th>Total</th><th>₹<?= number_format($total_static, 2) ?></th><th></th></tr>
+          </tbody>
+        </table>
+      </div>
 
-    <!-- Dynamic Savings Table -->
-    <h5 class="mb-3 text-start mt-5">📌 Dynamic Savings</h5>
-    <table class="table table-bordered text-start">
-      <thead>
-        <tr>
-          <th>Type</th>
-          <th>Name</th>
-          <th>Amount (₹)</th>
-          <th>Action</th>
-        </tr>
-      </thead>
-      <tbody>
-        <?php while($row = $dynamicSavings->fetch_assoc()): ?>
-        <tr>
-          <td><?= htmlspecialchars($row['type']) ?></td>
-          <td><?= htmlspecialchars($row['name']) ?></td>
-          <td><?= htmlspecialchars($row['amount']) ?></td>
-          <td>
-            <form method="POST" style="display:inline;">
-              <input type="hidden" name="delete_id" value="<?= $row['id'] ?>">
-              <button type="submit" class="btn btn-danger btn-sm">🗑 Delete</button>
-            </form>
-          </td>
-        </tr>
-        <?php endwhile; ?>
-        <tr class="table-secondary">
-          <td><strong>Total</strong></td>
-          <td></td>
-          <td><strong>₹ <?= number_format($totalSavings, 2) ?></strong></td>
-          <td></td>
-        </tr>
-      </tbody>
-    </table>
+      <div class="col-md-6">
+        <h5 class="text-center text-secondary">Dynamic Savings (Flexible)</h5>
+        <table class="table table-bordered table-hover table-data">
+          <thead>
+            <tr><th>Name</th><th>Amount (₹)</th><th>Actions</th></tr>
+          </thead>
+          <tbody>
+            <?php foreach ($dynamicSavings as $doc): ?>
+            <tr>
+              <td><?= htmlspecialchars($doc['name']) ?></td>
+              <td><?= number_format($doc['amount'], 2) ?></td>
+              <td>
+                <form method="POST" class="d-inline">
+                  <input type="hidden" name="action" value="delete">
+                  <input type="hidden" name="id" value="<?= $doc['_id'] ?>">
+                  <input type="hidden" name="type" value="dynamic">
+                  <button class="btn btn-sm btn-danger" onclick="return confirm('Delete this dynamic savings record?')">🗑️</button>
+                </form>
+              </td>
+            </tr>
+            <?php endforeach; ?>
+            <tr class="total-row"><th>Total</th><th>₹<?= number_format($total_dynamic, 2) ?></th><th></th></tr>
+          </tbody>
+        </table>
+      </div>
+    </div>
+
+    <div class="text-start mt-4">
+      <a href="dashboard.php" class="btn btn-outline-primary">⬅ Back to Dashboard</a>
+    </div>
   </div>
 </div>
 </body>
