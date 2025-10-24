@@ -1,231 +1,229 @@
 <?php
 session_start();
-if (!isset($_SESSION['user_id'])) {
-    header("Location: login.php");
-    exit;
-}
+// Load Composer dependencies and the custom connection class
+require __DIR__ . '/vendor/autoload.php';
 
-$host = 'localhost';
-$db = 'finance_manager';
-$user = 'root';
-$pass = '';
-$port = 3307;
+use App\Database\MongoDBClient;
 
-$conn = new mysqli($host, $user, $pass, $db, $port);
-if ($conn->connect_error) {
-    die("Connection failed: " . $conn->connect_error);
-}
+// --- INITIALIZATION ---
+// Get user ID from session. Based on the SQL dump, user_id is an integer.
+$user_id = (int)($_SESSION['user_id'] ?? 58063); 
 
-$user_id = $_SESSION['user_id'] ?? 1;
+// Initialize all totals to zero
+$total_income = 0.0;
+$total_static_expense = 0.0;
+$total_dynamic_expense = 0.0;
+$total_static_savings = 0.0;
+$total_dynamic_savings = 0.0;
 
-// Fetch total from table with optional type
-function fetch_total($conn, $table, $has_type = false, $type_value = null) {
-    global $user_id;
+// --- AGGREGATION PIPELINE FUNCTION ---
+/**
+ * Executes a MongoDB Aggregation Pipeline to calculate the sum of the 'amount' field
+ * for a specific user_id within a given collection.
+ * * @param string $collectionName The name of the collection (e.g., 'income').
+ * @param int $userId The user_id to filter the documents by.
+ * @return float The calculated total amount.
+ */
+function get_total_amount(string $collectionName, int $userId): float {
+    try {
+        $collection = MongoDBClient::getCollection($collectionName);
+        
+        $pipeline = [
+            // 1. Filter: Match documents belonging to the current user
+            ['$match' => ['user_id' => $userId]],
+            
+            // 2. Group: Sum the 'amount' field across all matched documents
+            ['$group' => [
+                '_id' => null, // Group all results into one document
+                'totalAmount' => ['$sum' => '$amount'] // Calculate the sum
+            ]]
+        ];
 
-    if ($has_type && $type_value !== null) {
-        $query = "SELECT SUM(amount) AS total FROM $table WHERE user_id = ? AND type = ?";
-        $stmt = $conn->prepare($query);
-        $stmt->bind_param("is", $user_id, $type_value);
-    } else {
-        $query = "SELECT SUM(amount) AS total FROM $table WHERE user_id = ?";
-        $stmt = $conn->prepare($query);
-        $stmt->bind_param("i", $user_id);
+        $result = $collection->aggregate($pipeline);
+        
+        // Fetch the result document
+        $doc = $result->toArray();
+        
+        // Return the totalAmount, or 0.0 if no documents were found
+        return isset($doc[0]['totalAmount']) ? (float)$doc[0]['totalAmount'] : 0.0;
+
+    } catch (Exception $e) {
+        // Log the error but continue execution for other reports
+        error_log("MongoDB Aggregation Error in $collectionName: " . $e->getMessage());
+        return 0.0; 
     }
-
-    $stmt->execute();
-    $result = $stmt->get_result();
-    return $result->fetch_assoc()['total'] ?? 0;
 }
 
-// Fetch totals
-$total_income = fetch_total($conn, "income");
-$static_expenses = fetch_total($conn, "static_expenses");
-$dynamic_expenses = fetch_total($conn, "dynamic_expenses");
-$static_savings = fetch_total($conn, "savings", true, "static");
-$dynamic_savings = fetch_total($conn, "savings", true, "dynamic");
+// --- FETCHING ALL TOTALS ---
 
-$total_expenses = $static_expenses + $dynamic_expenses;
-$total_savings = $static_savings + $dynamic_savings;
-$remaining_income = $total_income - ($total_expenses + $total_savings);
+// Income
+$total_income = get_total_amount('income', $user_id);
 
-// Fetch Group Contribution Data
-$group_contributions = [];
-$group_query = "SELECT g.group_name, SUM(e.amount) AS total_paid, SUM(s.share_amount) AS total_owed 
-                FROM groups g 
-                LEFT JOIN group_expenses e ON g.group_id = e.group_id 
-                LEFT JOIN expense_shares s ON e.expense_id = s.expense_id
-                WHERE g.created_by = ? GROUP BY g.group_id";
-$stmt = $conn->prepare($group_query);
-$stmt->bind_param("i", $user_id);
-$stmt->execute();
-$stmt->store_result();
-$stmt->bind_result($group_name, $total_paid, $total_owed);
+// Expenses
+$total_static_expense = get_total_amount('static_expenses', $user_id);
+$total_dynamic_expense = get_total_amount('dynamic_expenses', $user_id);
 
-while ($stmt->fetch()) {
-    $group_contributions[] = [
-        'group_name' => $group_name,
-        'total_paid' => $total_paid,
-        'total_owed' => $total_owed,
-        'net_balance' => $total_paid - $total_owed
+// Savings
+// Note: Savings collection needs an extra filter by 'type' ('static' or 'dynamic')
+
+try {
+    $savingsCollection = MongoDBClient::getCollection('savings');
+
+    // 1. Total Static Savings
+    $pipelineStatic = [
+        ['$match' => ['user_id' => $user_id, 'type' => 'static']],
+        ['$group' => ['_id' => null, 'totalAmount' => ['$sum' => '$amount']]]
     ];
+    $resultStatic = $savingsCollection->aggregate($pipelineStatic)->toArray();
+    $total_static_savings = isset($resultStatic[0]['totalAmount']) ? (float)$resultStatic[0]['totalAmount'] : 0.0;
+
+    // 2. Total Dynamic Savings
+    $pipelineDynamic = [
+        ['$match' => ['user_id' => $user_id, 'type' => 'dynamic']],
+        ['$group' => ['_id' => null, 'totalAmount' => ['$sum' => '$amount']]]
+    ];
+    $resultDynamic = $savingsCollection->aggregate($pipelineDynamic)->toArray();
+    $total_dynamic_savings = isset($resultDynamic[0]['totalAmount']) ? (float)$resultDynamic[0]['totalAmount'] : 0.0;
+
+} catch (Exception $e) {
+    error_log("MongoDB Savings Aggregation Error: " . $e->getMessage());
 }
+
+
+// --- CALCULATING FINAL BALANCE ---
+$total_expenses = $total_static_expense + $total_dynamic_expense;
+$total_savings = $total_static_savings + $total_dynamic_savings;
+
+// Remaining Balance = Income - Expenses - Total Savings Committed
+$remaining_balance = $total_income - $total_expenses - $total_savings;
 ?>
 
 <!DOCTYPE html>
 <html lang="en">
 <head>
   <meta charset="UTF-8">
-  <title>Finance Report</title>
+  <title>Financial Report</title>
   <link href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.0/dist/css/bootstrap.min.css" rel="stylesheet">
   <link href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.0.0/css/all.min.css" rel="stylesheet">
   <style>
     body {
-      background: linear-gradient(to right, #e0f7fa, #fce4ec);
+      background: linear-gradient(to right, #f7f9fc, #f0f4f7);
       font-family: 'Segoe UI', sans-serif;
     }
-    .dashboard-title {
-      font-weight: 800;
+    .report-card {
+      background: #ffffff;
+      border-radius: 25px;
+      padding: 40px;
+      box-shadow: 0 10px 30px rgba(0,0,0,0.1);
+      margin-top: 50px;
+    }
+    .report-title {
       font-size: 32px;
-      color: #2e2e2e;
+      font-weight: 700;
+      color: #333;
       margin-bottom: 30px;
     }
-    .card {
-      border: none;
-      border-radius: 20px;
-      transition: transform 0.3s, box-shadow 0.3s;
-      background: linear-gradient(to bottom right, #ffffff, #f3f4f6);
+    .metric-card {
+      border: 1px solid #e0e0e0;
+      border-radius: 15px;
+      padding: 20px;
+      margin-bottom: 20px;
+      transition: transform 0.2s;
     }
-    .card:hover {
-      transform: translateY(-5px);
-      box-shadow: 0 10px 25px rgba(0,0,0,0.1);
+    .metric-card:hover {
+        transform: translateY(-3px);
+        box-shadow: 0 4px 15px rgba(0,0,0,0.1);
     }
-    .card-body {
-      text-align: center;
-      padding: 30px 20px;
+    .metric-label {
+      font-weight: 600;
+      color: #6c757d;
+      font-size: 1.1rem;
     }
-    .module-title {
-      font-size: 18px;
-      font-weight: 700;
-      margin-top: 15px;
-      color: #333;
+    .metric-value {
+      font-size: 1.8rem;
+      font-weight: 800;
     }
-    .icon-box {
-      font-size: 36px;
-    }
-    .income-icon { color: #4caf50; }
-    .expense-icon { color: #e53935; }
-    .saving-icon { color: #f9a825; }
-    .remaining-icon { color: #1976d2; }
+    .income-bg { background-color: #e8f5e9; border-left: 5px solid #4caf50; }
+    .expense-bg { background-color: #ffebee; border-left: 5px solid #f44336; }
+    .savings-bg { background-color: #fff8e1; border-left: 5px solid #ff9800; }
+    .balance-bg { background-color: #e3f2fd; border-left: 5px solid #2196f3; }
+    .balance-positive { color: #28a745; }
+    .balance-negative { color: #dc3545; }
   </style>
 </head>
 <body>
 
-<div class="container my-5">
-  <h2 class="text-center dashboard-title">📊 Financial Report - <?php echo htmlspecialchars($_SESSION['user_name']); ?></h2>
+<div class="container">
+  <div class="report-card">
+    <div class="report-title text-center">📈 Financial Summary Report (MongoDB)</div>
 
-  <div class="row g-4 justify-content-center">
-
-    <!-- Total Income -->
-    <div class="col-md-4 col-sm-6">
-      <div class="card shadow-sm">
-        <div class="card-body">
-          <div class="icon-box income-icon"><i class="fas fa-wallet"></i></div>
-          <div class="module-title">Total Income</div>
-          <h4 class="mt-2">₹ <?= number_format($total_income, 2) ?></h4>
+    <!-- Income & Expense Totals -->
+    <div class="row">
+        <h4 class="mb-3 text-secondary">Summary Totals</h4>
+        
+        <div class="col-md-6">
+            <div class="metric-card income-bg">
+                <div class="metric-label"><i class="fas fa-arrow-up text-success"></i> Total Income</div>
+                <div class="metric-value text-success">₹ <?= number_format($total_income, 2) ?></div>
+            </div>
         </div>
-      </div>
-    </div>
 
-    <!-- Static Expenses -->
-    <div class="col-md-4 col-sm-6">
-      <div class="card shadow-sm">
-        <div class="card-body">
-          <div class="icon-box expense-icon"><i class="fas fa-money-bill"></i></div>
-          <div class="module-title">Static Expenses</div>
-          <h4 class="mt-2">₹ <?= number_format($static_expenses, 2) ?></h4>
+        <div class="col-md-6">
+            <div class="metric-card expense-bg">
+                <div class="metric-label"><i class="fas fa-arrow-down text-danger"></i> Total Expenses</div>
+                <div class="metric-value text-danger">₹ <?= number_format($total_expenses, 2) ?></div>
+            </div>
         </div>
-      </div>
     </div>
+    
+    <!-- Savings & Detailed Expenses -->
+    <div class="row mt-4">
+        <h4 class="mb-3 text-secondary">Detailed Breakdown</h4>
 
-    <!-- Dynamic Expenses -->
-    <div class="col-md-4 col-sm-6">
-      <div class="card shadow-sm">
-        <div class="card-body">
-          <div class="icon-box expense-icon"><i class="fas fa-coins"></i></div>
-          <div class="module-title">Dynamic Expenses</div>
-          <h4 class="mt-2">₹ <?= number_format($dynamic_expenses, 2) ?></h4>
+        <div class="col-md-4">
+            <div class="metric-card savings-bg">
+                <div class="metric-label"><i class="fas fa-piggy-bank text-warning"></i> Total Savings Committed</div>
+                <div class="metric-value text-warning">₹ <?= number_format($total_savings, 2) ?></div>
+                <hr>
+                <div class="text-muted small">Static: ₹ <?= number_format($total_static_savings, 2) ?></div>
+                <div class="text-muted small">Dynamic: ₹ <?= number_format($total_dynamic_savings, 2) ?></div>
+            </div>
         </div>
-      </div>
-    </div>
 
-    <!-- Static Savings -->
-    <div class="col-md-4 col-sm-6">
-      <div class="card shadow-sm">
-        <div class="card-body">
-          <div class="icon-box saving-icon"><i class="fas fa-piggy-bank"></i></div>
-          <div class="module-title">Static Savings</div>
-          <h4 class="mt-2">₹ <?= number_format($static_savings, 2) ?></h4>
+        <div class="col-md-4">
+            <div class="metric-card expense-bg">
+                <div class="metric-label"><i class="fas fa-money-bill-wave text-danger"></i> Static Expenses</div>
+                <div class="metric-value text-danger">₹ <?= number_format($total_static_expense, 2) ?></div>
+            </div>
         </div>
-      </div>
-    </div>
-
-    <!-- Dynamic Savings -->
-    <div class="col-md-4 col-sm-6">
-      <div class="card shadow-sm">
-        <div class="card-body">
-          <div class="icon-box saving-icon"><i class="fas fa-chart-line"></i></div>
-          <div class="module-title">Dynamic Savings</div>
-          <h4 class="mt-2">₹ <?= number_format($dynamic_savings, 2) ?></h4>
+        
+        <div class="col-md-4">
+            <div class="metric-card expense-bg">
+                <div class="metric-label"><i class="fas fa-shopping-bag text-danger"></i> Dynamic Expenses</div>
+                <div class="metric-value text-danger">₹ <?= number_format($total_dynamic_expense, 2) ?></div>
+            </div>
         </div>
-      </div>
     </div>
-
-    <!-- Remaining Income -->
-    <div class="col-md-4 col-sm-6">
-      <div class="card shadow-sm">
-        <div class="card-body">
-          <div class="icon-box remaining-icon"><i class="fas fa-balance-scale"></i></div>
-          <div class="module-title">Remaining Income</div>
-          <h4 class="mt-2">₹ <?= number_format($remaining_income, 2) ?></h4>
+    
+    <!-- Final Balance -->
+    <div class="row mt-4">
+        <div class="col-12">
+            <div class="metric-card balance-bg">
+                <div class="metric-label"><i class="fas fa-balance-scale text-primary"></i> NET REMAINING BALANCE</div>
+                <div class="metric-value <?= $remaining_balance >= 0 ? 'balance-positive' : 'balance-negative' ?>">
+                    ₹ <?= number_format($remaining_balance, 2) ?>
+                </div>
+                <div class="text-muted small mt-2">
+                    (Income - Total Expenses - Total Savings)
+                </div>
+            </div>
         </div>
-      </div>
     </div>
-
+    
+    <div class="text-start mt-4">
+        <a href="dashboard.php" class="btn btn-outline-secondary">⬅ Back to Dashboard</a>
+    </div>
   </div>
-
-  <!-- Group Contribution Summary Section -->
-  <h3 class="text-center mt-5 mb-4">🔁 Group Contribution Summary</h3>
-  <div class="row g-4 justify-content-center">
-    <?php foreach ($group_contributions as $contribution): ?>
-      <div class="col-md-4 col-sm-6">
-        <div class="card shadow-sm">
-          <div class="card-body">
-            <div class="icon-box income-icon"><i class="fas fa-users"></i></div>
-            <div class="module-title"><?= htmlspecialchars($contribution['group_name']) ?></div>
-            <h5 class="mt-2">Total Paid: ₹ <?= number_format($contribution['total_paid'], 2) ?></h5>
-            <h5>Total Owed: ₹ <?= number_format($contribution['total_owed'], 2) ?></h5>
-            <h5 class="fw-bold <?= $contribution['net_balance'] >= 0 ? 'text-success' : 'text-danger' ?>">
-              Net Balance: ₹ <?= number_format($contribution['net_balance'], 2) ?>
-            </h5>
-            <h6>Status: <?= $contribution['net_balance'] >= 0 ? 'You are owed money' : 'You owe money' ?></h6>
-          </div>
-        </div>
-      </div>
-    <?php endforeach; ?>
-  </div>
-
 </div>
-
-  </div>
-                <div class="text-start mb-3">
-      <a href="dashboard.php" class="btn btn-outline-primary btn-main">
-        ⬅ Back to Dashboard
-      </a>
-    </div>
-<script src="https://cdn.jsdelivr.net/npm/bootstrap@5.3.0/dist/js/bootstrap.bundle.min.js"></script>
 </body>
 </html>
-
-<?php
-$conn->close();
-?>
