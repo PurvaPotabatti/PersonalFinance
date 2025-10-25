@@ -1,66 +1,41 @@
 <?php
 session_start();
+require __DIR__ . '/vendor/autoload.php';
+use App\Database\MongoDBClient;
+use MongoDB\BSON\ObjectId;
 
-if (!isset($_SESSION['user_id'])) {
-    header("Location: login.php");
-    exit;
-}
+$user_id = $_SESSION['user_id'] ?? 1;
+$group_id = $_GET['group_id'] ?? '';
 
-$host = 'localhost';
-$db = 'finance_manager';
-$user = 'root';
-$pass = '';
-$port = 3307;
+if (!preg_match('/^[a-f\d]{24}$/i', $group_id)) die("Invalid group ID.");
+$groupIdObj = new ObjectId($group_id);
 
-$conn = new mysqli($host, $user, $pass, $db, $port);
-if ($conn->connect_error) {
-    die("Connection failed: " . $conn->connect_error);
-}
+$groupsCollection = MongoDBClient::getCollection('groups');
+$membersCollection = MongoDBClient::getCollection('group_members');
+$expensesCollection = MongoDBClient::getCollection('group_expenses');
 
-$user_id = $_SESSION['user_id'];
-$group_id = $_GET['group_id'] ?? 0;
+$group = $groupsCollection->findOne(['_id' => $groupIdObj, 'created_by' => $user_id]);
+if (!$group) die("Group not found or access denied.");
 
-// Fetch group name
-$group_name = '';
-$stmt = $conn->prepare("SELECT group_name FROM groups WHERE group_id = ? AND created_by = ?");
-$stmt->bind_param("ii", $group_id, $user_id);
-$stmt->execute();
-$stmt->bind_result($group_name);
-$stmt->fetch();
-$stmt->close();
-
-if (!$group_name) {
-    echo "Group not found or access denied.";
-    exit;
-}
-
-// Fetch members
+// Members
+$membersCursor = $membersCollection->find(['group_id' => $groupIdObj]);
 $members = [];
-$res = $conn->query("SELECT member_id, name FROM group_members WHERE group_id = $group_id");
-while ($row = $res->fetch_assoc()) {
-    $members[$row['member_id']] = [
-        'name' => $row['name'],
-        'paid' => 0
-    ];
+foreach ($membersCursor as $m) {
+    $members[(string)$m['_id']] = ['name' => $m['name'], 'paid' => 0];
 }
 
-// Total up all expenses and calculate who paid how much
+// Expenses
+$expensesCursor = $expensesCollection->find(['group_id' => $groupIdObj]);
 $total_expense = 0;
-$res = $conn->query("SELECT amount, paid_by FROM group_expenses WHERE group_id = $group_id");
-while ($row = $res->fetch_assoc()) {
-    $amount = $row['amount'];
-    $paid_by = $row['paid_by'];
-    $total_expense += $amount;
-    if (isset($members[$paid_by])) {
-        $members[$paid_by]['paid'] += $amount;
-    }
+foreach ($expensesCursor as $exp) {
+    $total_expense += $exp['amount'];
+    $paid_by_id = (string)$exp['paid_by'];
+    if (isset($members[$paid_by_id])) $members[$paid_by_id]['paid'] += $exp['amount'];
 }
 
-// Calculate fair share for each member
+// Fair share and net
 $member_count = count($members);
 $fair_share = $member_count > 0 ? $total_expense / $member_count : 0;
-
-// Compute net balances
 $balances = [];
 foreach ($members as $id => $data) {
     $net = $data['paid'] - $fair_share;
@@ -71,54 +46,28 @@ foreach ($members as $id => $data) {
         'net' => $net
     ];
 }
-
-// header("Location: group_contributions.php");
-// exit();
 ?>
 
 <!DOCTYPE html>
 <html lang="en">
 <head>
-  <meta charset="UTF-8">
-  <title>Contribution Summary - <?= htmlspecialchars($group_name) ?></title>
-  <link href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.0/dist/css/bootstrap.min.css" rel="stylesheet">
-  <style>
-    body {
-      background: linear-gradient(to right, #fce4ec, #e0f7fa);
-      font-family: 'Segoe UI', sans-serif;
-    }
-    .dashboard-card {
-      background: white;
-      border-radius: 24px;
-      padding: 40px;
-      margin-top: 50px;
-      box-shadow: 0 10px 30px rgba(0,0,0,0.1);
-    }
-    .section-title {
-      font-size: 28px;
-      font-weight: bold;
-      color: #2c3e50;
-    }
-    .table th {
-      background-color: #f3e5f5;
-    }
-  </style>
+<meta charset="UTF-8">
+<title>Contribution Summary - <?= htmlspecialchars($group['name']) ?></title>
+<link href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.0/dist/css/bootstrap.min.css" rel="stylesheet">
+<style>
+body { background: linear-gradient(to right, #fce4ec, #e0f7fa); font-family: 'Segoe UI', sans-serif; }
+.dashboard-card { background: white; border-radius: 24px; padding: 40px; margin-top: 50px; box-shadow: 0 10px 30px rgba(0,0,0,0.1); }
+.section-title { font-size: 28px; font-weight: bold; color: #2c3e50; }
+.table th { background-color: #f3e5f5; }
+</style>
 </head>
 <body>
 <div class="container">
   <div class="dashboard-card">
-    <div class="section-title mb-4">🔁 Contribution Summary - <?= htmlspecialchars($group_name) ?></div>
+    <div class="section-title mb-4">🔁 Contribution Summary - <?= htmlspecialchars($group['name']) ?></div>
 
     <table class="table table-bordered">
-      <thead>
-        <tr>
-          <th>Member</th>
-          <th>Total Paid</th>
-          <th>Total Owed</th>
-          <th>Net Balance</th>
-          <th>Status</th>
-        </tr>
-      </thead>
+      <thead><tr><th>Member</th><th>Total Paid</th><th>Total Owed</th><th>Net Balance</th><th>Status</th></tr></thead>
       <tbody>
         <?php foreach ($balances as $b): ?>
         <tr>
