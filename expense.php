@@ -1,259 +1,110 @@
 <?php
-session_start();
-$host = 'localhost';
-$db = 'finance_manager';
-$user = 'root';
-$pass = '';
-$port = 3307;
+// PHP Error Reporting (Keep this at the top for debugging)
+ini_set('display_errors', 1);
+ini_set('display_startup_errors', 1);
+error_reporting(E_ALL);
 
-$conn = new mysqli($host, $user, $pass, $db, $port);
-if ($conn->connect_error) {
-    die("Connection failed: " . $conn->connect_error);
+// Include the database connection handler
+require_once __DIR__ . '/DB.php'; 
+
+// CRITICAL FIX: The use statement must be here, near the top!
+use MongoDB\BSON\UTCDateTime; 
+
+// Use the connection handler to get your database instance
+$database = DB::getDatabase();
+// Define the two collections you'll be working with
+$staticCollection = $database->static_expenses;
+$dynamicCollection = $database->dynamic_expenses;
+
+$message = ''; // Variable for user feedback
+
+// 1. Fetch Static Categories for the Form Dropdown
+$staticCategories = [];
+try {
+    // Find all documents, only projecting the 'name' field
+    $cursor = $staticCollection->find([], ['projection' => ['name' => 1]]);
+    $staticCategories = $cursor->toArray();
+} catch (Exception $e) {
+    $message = "Could not load categories: " . $e->getMessage();
 }
 
-$user_id = $_SESSION['user_id'] ?? 1; // Replace with actual session logic
-$message = '';
+// 2. Handle Form Submission (Save to dynamic_expenses)
+if ($_SERVER["REQUEST_METHOD"] == "POST" && isset($_POST['submit_expense'])) {
+    
+    // **IMPORTANT: Replace 1 with Member 1's actual session user ID logic later**
+    $userId = 1; 
+    
+    // Get and validate inputs (these should be defined BEFORE the IF check)
+    $amount = filter_input(INPUT_POST, 'amount', FILTER_VALIDATE_FLOAT);
+    $category = htmlspecialchars(trim($_POST['expense_category']));
+    $notes = htmlspecialchars(trim($_POST['notes']));
 
-if ($_SERVER["REQUEST_METHOD"] == "POST" && isset($_POST['action'])) {
-    $action = $_POST['action'];
-    $type = $_POST['type'];
+    if ($amount > 0 && !empty($category)) { // Opening bracket for IF
+        
+        // Prepare the document for insertion
+        $expenseDocument = [
+            'user_id' => $userId,
+            'amount' => $amount,
+            'category' => $category,
+            'notes' => $notes,
+            'created_at' => new UTCDateTime(), // Record the time (Note: UTCDateTime() is used here)
+        ];
 
-    $table = $type === 'static' ? 'static_expenses' : 'dynamic_expenses';
-
-    if ($action === 'add') 
-    {
-        $name = $_POST['name'];
-        $amount = $_POST['amount'];
-        $stmt = $conn->prepare("INSERT INTO $table (user_id, name, amount) VALUES (?, ?, ?)");
-        $stmt->bind_param("isd", $user_id, $name, $amount);
-        $stmt->execute();
-        $stmt->close();
-        $message = ucfirst($type) . " expense added.";
-    } 
-    elseif ($action === 'update') 
-    {
-        $id = $_POST['id'];
-        $name = $_POST['name'];
-        $amount = $_POST['amount'];
-        $stmt = $conn->prepare("UPDATE $table SET name=?, amount=? WHERE id=? AND user_id=?");
-        $stmt->bind_param("sdii", $name, $amount, $id, $user_id);
-        $stmt->execute();
-        $stmt->close();
-        $message = ucfirst($type) . " expense updated.";
-    } 
-    elseif ($action === 'delete') 
-    {
-        $id = $_POST['id'];
-        $stmt = $conn->prepare("DELETE FROM $table WHERE id=? AND user_id=?");
-        $stmt->bind_param("ii", $id, $user_id);
-        $stmt->execute();
-        $stmt->close();
-        $message = ucfirst($type) . " expense deleted.";
+        // 3. Insert into the dynamic_expenses collection
+        // 3. Insert into the dynamic_expenses collection
+        try { // Start of TRY (Line 57)
+            $dynamicCollection->insertOne($expenseDocument);
+            $message = "Expense of **$amount** recorded successfully!";
+            // Optionally clear the form or redirect here
+        } 
+        // NO SEMICOLON HERE! 
+        catch (Exception $e) { // Start of CATCH (Line 64)
+            $message = "Failed to record expense: " . $e->getMessage();
+        }
+        // The closing brace for the inner IF (Line 63)
+        
+    } else { // This is the ELSE block for the IF on line 40
+        $message = "Please enter a valid amount and select a category.";
     }
-    header("Location: expense.php");
-exit();
-
-}
-
-$static = $conn->query("SELECT id, name, amount FROM static_expenses WHERE user_id = $user_id");
-$dynamic = $conn->query("SELECT id, name, amount FROM dynamic_expenses WHERE user_id = $user_id");
+} 
+// The closing brace for the main IF (if ($_SERVER["REQUEST_METHOD"] == "POST"...))
 ?>
 
 <!DOCTYPE html>
 <html lang="en">
 <head>
-  <meta charset="UTF-8">
-  <title>Enhanced Expense Manager</title>
-  <link href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.0/dist/css/bootstrap.min.css" rel="stylesheet">
-  <style>
-    body {
-      background: linear-gradient(to bottom, #f0f2f5, #e3e9ef);
-      font-family: 'Segoe UI', sans-serif;
-      color: #333;
-    }
-    .dashboard-card {
-      background: #ffffff;
-      border-radius: 20px;
-      padding: 40px;
-      box-shadow: 0 8px 20px rgba(0, 0, 0, 0.1);
-      margin-top: 50px;
-    }
-    .form-area, .tables-section {
-      display: none;
-      background: #fefefe;
-      border-radius: 16px;
-      padding: 25px;
-      box-shadow: 0 6px 12px rgba(0,0,0,0.05);
-      margin-top: 30px;
-    }
-    .section-title {
-      font-size: 28px;
-      font-weight: 600;
-      margin-bottom: 30px;
-      color: #2c3e50;
-    }
-    .btn-expense {
-      width: 220px;
-      margin: 12px;
-      padding: 14px 18px;
-      font-size: 16px;
-      font-weight: 600;
-      border-radius: 12px;
-      transition: 0.3s ease;
-    }
-    .btn-outline-primary:hover,
-    .btn-outline-success:hover,
-    .btn-info:hover {
-      transform: translateY(-2px);
-      box-shadow: 0 6px 12px rgba(0,0,0,0.1);
-    }
-    .btn-info {
-      background-color: #17a2b8;
-      color: white;
-    }
-    th { background-color: #ecf0f1; }
-    .table th, .table td { vertical-align: middle; }
-    .form-label { font-weight: 500; }
-    h5 { font-weight: 600; color: #34495e; }
-  </style>
+    <title>Record Expense</title>
 </head>
 <body>
 
-<div class="container">
-  <div class="dashboard-card text-center">
-    <div class="section-title">💸 Enhanced Expense Manager</div>
-
+    <h2>Record New Personal Expense</h2>
+    
     <?php if ($message): ?>
-      <div class="alert alert-success"><?= htmlspecialchars($message) ?></div>
+        <p style="color: green; font-weight: bold;"><?= $message ?></p>
     <?php endif; ?>
 
-    <!-- Static Form -->
-    <div class="form-area" id="static-form">
-      <h5>Static Expense Entry</h5>
-      <form method="POST">
-        <input type="hidden" name="action" value="add">
-        <input type="hidden" name="type" value="static">
-        <div class="mb-3 text-start">
-          <label class="form-label">Expense Name</label>
-          <input type="text" class="form-control" name="name" required>
-        </div>
-        <div class="mb-3 text-start">
-          <label class="form-label">Amount</label>
-          <input type="number" step="0.01" class="form-control" name="amount" required>
-        </div>
-        <button type="submit" class="btn btn-primary btn-expense">💾 Add Static Expense</button>
-      </form>
-    </div>
-
-    <!-- Dynamic Form -->
-    <div class="form-area" id="dynamic-form">
-      <h5>Dynamic Expense Entry</h5>
-      <form method="POST">
-        <input type="hidden" name="action" value="add">
-        <input type="hidden" name="type" value="dynamic">
-        <div class="mb-3 text-start">
-          <label class="form-label">Expense Name</label>
-          <input type="text" class="form-control" name="name" required>
-        </div>
-        <div class="mb-3 text-start">
-          <label class="form-label">Amount</label>
-          <input type="number" step="0.01" class="form-control" name="amount" required>
-        </div>
-        <button type="submit" class="btn btn-success btn-expense">💾 Add Dynamic Expense</button>
-      </form>
-    </div>
-
-    <!-- Form Buttons -->
-    <div class="mt-4 mb-3">
-      <button class="btn btn-outline-primary btn-expense" onclick="toggleForm('static')">➕ Static Expense</button>
-      <button class="btn btn-outline-success btn-expense" onclick="toggleForm('dynamic')">➕ Dynamic Expense</button>
-    </div>
-
-    <!-- Tables -->
-    <div class="mt-5">
-      <button class="btn btn-info btn-expense" onclick="toggleTable()">📊 View Expenses</button>
-    </div>
-                <div class="text-start mb-3">
-      <a href="dashboard.php" class="btn btn-outline-primary btn-main">
-        ⬅ Back to Dashboard
-      </a>
-    </div>
-
-    <div class="tables-section mt-4" id="tables-section">
-      <div class="row mt-4">
-        <div class="col-md-6">
-          <h5 class="text-center">Static Expenses</h5>
-          <table class="table table-bordered">
-            <thead><tr><th>Name</th><th>Amount</th><th>Actions</th></tr></thead>
-            <tbody>
-              <?php
-              $total_static = 0;
-              while($row = $static->fetch_assoc()):
-              $total_static += $row['amount'];
-              ?>
-              <tr>
-                <td><?= htmlspecialchars($row['name']) ?></td>
-                <td>₹<?= htmlspecialchars($row['amount']) ?></td>
-                <td>
-                  <form method="POST" class="d-inline">
-                    <input type="hidden" name="action" value="delete">
-                    <input type="hidden" name="type" value="static">
-                    <input type="hidden" name="id" value="<?= $row['id'] ?>">
-                    <button class="btn btn-sm btn-danger" onclick="return confirm('Delete this expense?')">🗑️</button>
-                  </form>
-                </td>
-              </tr>
-              <?php endwhile; ?>
-              <tr><th>Total</th><th>₹<?= $total_static ?></th><th></th></tr>
-            </tbody>
-          </table>
-        </div>
-
-        <div class="col-md-6">
-          <h5 class="text-center">Dynamic Expenses</h5>
-          <table class="table table-bordered">
-            <thead><tr><th>Name</th><th>Amount</th><th>Actions</th></tr></thead>
-            <tbody>
-              <?php
-              $total_dynamic = 0;
-              while($row = $dynamic->fetch_assoc()):
-              $total_dynamic += $row['amount'];
-              ?>
-              <tr>
-                <td><?= htmlspecialchars($row['name']) ?></td>
-                <td>₹<?= htmlspecialchars($row['amount']) ?></td>
-                <td>
-                  <form method="POST" class="d-inline">
-                    <input type="hidden" name="action" value="delete">
-                    <input type="hidden" name="type" value="dynamic">
-                    <input type="hidden" name="id" value="<?= $row['id'] ?>">
-                    <button class="btn btn-sm btn-danger" onclick="return confirm('Delete this expense?')">🗑️</button>
-                  </form>
-                </td>
-              </tr>
-              <?php endwhile; ?>
-              <tr><th>Total</th><th>₹<?= $total_dynamic ?></th><th></th></tr>
-            </tbody>
-          </table>
-        </div>
-      </div>
-    </div>
-  </div>
-</div>
-
-<script>
-  function toggleForm(type) {
-    document.getElementById('static-form').style.display = (type === 'static') ? 'block' : 'none';
-    document.getElementById('dynamic-form').style.display = (type === 'dynamic') ? 'block' : 'none';
-    document.getElementById('tables-section').style.display = 'none';
-  }
-
-  function toggleTable() {
-    document.getElementById('static-form').style.display = 'none';
-    document.getElementById('dynamic-form').style.display = 'none';
-    document.getElementById('tables-section').style.display = 'block';
-  }
-</script>
+    <form method="POST" action="expense.php">
+        
+        <label for="expense_category">Category:</label><br>
+        <select name="expense_category" id="expense_category" required>
+            <option value="">-- Select Category --</option>
+            <?php foreach ($staticCategories as $category): ?>
+                <option value="<?= htmlspecialchars($category['name']) ?>">
+                    <?= htmlspecialchars($category['name']) ?>
+                </option>
+            <?php endforeach; ?>
+        </select>
+        <br><br>
+        
+        <label for="amount">Amount ($):</label><br>
+        <input type="number" step="0.01" name="amount" id="amount" required><br><br>
+        
+        <label for="notes">Notes:</label><br>
+        <textarea name="notes" id="notes" rows="3"></textarea><br><br>
+        
+        <button type="submit" name="submit_expense">Record Expense</button>
+        
+    </form>
 
 </body>
 </html>
