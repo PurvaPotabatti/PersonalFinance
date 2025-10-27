@@ -1,8 +1,35 @@
 <?php
 session_start();
+
+require_once __DIR__ . '/src/Database/MongoDBClient.php';
+use App\Database\MongoDBClient;
+
+// Redirect if not logged in
 if (!isset($_SESSION['user_id'])) {
     header("Location: login.php");
     exit;
+}
+
+try {
+    // Get MongoDB collection
+    $collection = MongoDBClient::getCollection('user');
+
+    // Fetch current user details
+    $user = $collection->findOne([
+        '_id' => new MongoDB\BSON\ObjectId($_SESSION['user_id'])
+    ]);
+
+    if (!$user) {
+        // If user not found, log out
+        session_destroy();
+        header("Location: login.php");
+        exit;
+    }
+
+    // Get username safely
+    $user_name = htmlspecialchars($user['name'] ?? 'User');
+} catch (Exception $e) {
+    die("Error connecting to MongoDB: " . $e->getMessage());
 }
 ?>
 
@@ -57,10 +84,10 @@ if (!isset($_SESSION['user_id'])) {
 <body>
 
 <div class="container my-5">
-  <h2 class="text-center dashboard-title">Welcome, <?php echo htmlspecialchars($_SESSION['user_name']); ?> 👋</h2>
+  <h2 class="text-center dashboard-title">Welcome, <?php echo $user_name; ?> 👋</h2>
 
   <div class="d-flex justify-content-end mb-3">
-    <a href="signup.php" class="btn btn-outline-danger">
+    <a href="logout.php" class="btn btn-outline-danger">
       <i class="fas fa-sign-out-alt me-2"></i> Log Out
     </a>
   </div>
