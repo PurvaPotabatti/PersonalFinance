@@ -44,41 +44,64 @@
         <button class="btn btn-success w-100" type="submit" name="register">Register</button>
       </form>
 
-      <!-- PHP Sign-up logic -->
+      <!-- ✅ PHP Sign-up logic with MongoDB Atlas -->
       <?php
+      require __DIR__ . '/vendor/autoload.php';
+      use MongoDB\Client;
+      use MongoDB\Driver\ServerApi;
+
+      // Load environment variables
+      $dotenv = Dotenv\Dotenv::createImmutable(__DIR__);
+      $dotenv->safeLoad();
+
+      $uri = $_ENV['MONGODB_URI'] ?? null;
+
+      if (!$uri) {
+          echo "<div class='alert alert-danger mt-3'>❌ MONGODB_URI not found in .env file.</div>";
+          exit;
+      }
+
+      // Connect to MongoDB Atlas
+      $apiVersion = new ServerApi(ServerApi::V1);
+      $client = new Client($uri, [], ['serverApi' => $apiVersion]);
+      $db = $client->selectDatabase('finance_manager');
+      $collection = $db->selectCollection('user');
+
       if ($_SERVER["REQUEST_METHOD"] == "POST" && isset($_POST['register'])) {
-          // Connect to DB
-          $conn = mysqli_connect("localhost", "root", "", "finance_manager", 3307);
-
-          if (!$conn) {
-              die("<div class='alert alert-danger mt-3'>Connection failed: " . mysqli_connect_error() . "</div>");
-          }
-
           // Sanitize inputs
-          $name = mysqli_real_escape_string($conn, $_POST['name']);
-          $email = mysqli_real_escape_string($conn, $_POST['email']);
-          $password = password_hash($_POST['password'], PASSWORD_DEFAULT);
-          $phone = mysqli_real_escape_string($conn, $_POST['phone_number']);
+          $name = trim($_POST['name']);
+          $email = trim($_POST['email']);
+          $password = password_hash(trim($_POST['password']), PASSWORD_DEFAULT);
+          $phone = trim($_POST['phone_number']);
           $user_id = uniqid();
 
           // Check if user already exists
-          $check = "SELECT * FROM Users WHERE email = '$email'";
-          $result = mysqli_query($conn, $check);
+          $existingUser = $collection->findOne(['email' => $email]);
 
-          if (mysqli_num_rows($result) > 0) {
-              echo "<div class='alert alert-warning mt-3'>Email already registered. Please <a href='login.php'>login</a>.</div>";
+          if ($existingUser) {
+              echo "<div class='alert alert-warning mt-3'>
+                      Email already registered. Please <a href='login.php'>login</a>.
+                    </div>";
           } else {
-              $sql = "INSERT INTO Users (user_id, name, email, password_hash, phone_number)
-                      VALUES ('$user_id', '$name', '$email', '$password', '$phone')";
+              $insertResult = $collection->insertOne([
+                  'user_id' => $user_id,
+                  'name' => $name,
+                  'email' => $email,
+                  'password_hash' => $password,
+                  'phone_number' => $phone,
+                  'created_at' => new MongoDB\BSON\UTCDateTime()
+              ]);
 
-              if (mysqli_query($conn, $sql)) {
-                  echo "<div class='alert alert-success mt-3'>Account created successfully. <a href='login.php'>Click here to login</a>.</div>";
+              if ($insertResult->getInsertedCount() > 0) {
+                  echo "<div class='alert alert-success mt-3'>
+                          ✅ Account created successfully. <a href='login.php'>Click here to login</a>.
+                        </div>";
               } else {
-                  echo "<div class='alert alert-danger mt-3'>Error: " . mysqli_error($conn) . "</div>";
+                  echo "<div class='alert alert-danger mt-3'>
+                          ❌ Something went wrong while creating the account.
+                        </div>";
               }
           }
-
-          mysqli_close($conn);
       }
       ?>
 
