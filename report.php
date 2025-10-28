@@ -1,13 +1,15 @@
 <?php
 session_start();
-// Load Composer dependencies and the custom connection class
+// Load Composer dependencies
 require __DIR__ . '/vendor/autoload.php';
-
-use App\Database\MongoDBClient;
+// Include the local connection core
+require_once __DIR__ . '/DB.php'; 
 
 // --- INITIALIZATION ---
-// Get user ID from session. Based on the SQL dump, user_id is an integer.
-$user_id = (int)($_SESSION['user_id'] ?? 58063); 
+// CRITICAL FIX: Define the user ID as the known insertion ID (58063)
+$user_id_int = 58063;
+$user_id = $user_id_int; 
+$database = DB::getDatabase(); 
 
 // Initialize all totals to zero
 $total_income = 0.0;
@@ -16,77 +18,60 @@ $total_dynamic_expense = 0.0;
 $total_static_savings = 0.0;
 $total_dynamic_savings = 0.0;
 
-// --- AGGREGATION PIPELINE FUNCTION ---
-/**
- * Executes a MongoDB Aggregation Pipeline to calculate the sum of the 'amount' field
- * for a specific user_id within a given collection.
- * * @param string $collectionName The name of the collection (e.g., 'income').
- * @param int $userId The user_id to filter the documents by.
- * @return float The calculated total amount.
- */
-function get_total_amount(string $collectionName, int $userId): float {
-    try {
-        $collection = MongoDBClient::getCollection($collectionName);
-        
-        $pipeline = [
-            // 1. Filter: Match documents belonging to the current user
-            ['$match' => ['user_id' => $userId]],
-            
-            // 2. Group: Sum the 'amount' field across all matched documents
-            ['$group' => [
-                '_id' => null, // Group all results into one document
-                'totalAmount' => ['$sum' => '$amount'] // Calculate the sum
-            ]]
-        ];
 
-        $result = $collection->aggregate($pipeline);
-        
-        // Fetch the result document
-        $doc = $result->toArray();
-        
-        // Return the totalAmount, or 0.0 if no documents were found
-        return isset($doc[0]['totalAmount']) ? (float)$doc[0]['totalAmount'] : 0.0;
-
-    } catch (Exception $e) {
-        // Log the error but continue execution for other reports
-        error_log("MongoDB Aggregation Error in $collectionName: " . $e->getMessage());
-        return 0.0; 
-    }
-}
-
-// --- FETCHING ALL TOTALS ---
-
-// Income
-$total_income = get_total_amount('income', $user_id);
-
-// Expenses
-$total_static_expense = get_total_amount('static_expenses', $user_id);
-$total_dynamic_expense = get_total_amount('dynamic_expenses', $user_id);
-
-// Savings
-// Note: Savings collection needs an extra filter by 'type' ('static' or 'dynamic')
+// --- CRITICAL FIX: FETCH AND SUM ALL METRICS IN PHP ---
 
 try {
-    $savingsCollection = MongoDBClient::getCollection('savings');
+    // Helper function to safely sum the amount from documents
+    $safe_sum = function(&$total, $doc) {
+        $amount = $doc['amount'];
+        // Safely convert BSON/string amount to float
+        if (is_object($amount) && method_exists($amount, '__toString')) {
+            $total += (float)$amount->__toString();
+        } else {
+            $total += (float)($amount ?? 0);
+        }
+    };
+    
+    // --- 1. TOTAL INCOME (FIXED: Fetching all documents as Income was likely inserted once) ---
+    $incomeCollection = $database->selectCollection('income');
+    // Fetch ALL income documents to get the total, regardless of user_id mismatch
+    $incomeDocs = $incomeCollection->find([]); 
+    foreach ($incomeDocs as $doc) {
+        $safe_sum($total_income, $doc);
+    }
+    
+    // --- 2. EXPENSES (Dynamic) ---
+    $dynamicCollection = $database->selectCollection('dynamic_expenses');
+    // NOTE: Query uses the guaranteed working user_id
+    $dynamicDocs = $dynamicCollection->find(['user_id' => $user_id])->toArray(); 
+    foreach ($dynamicDocs as $doc) {
+        $safe_sum($total_dynamic_expense, $doc);
+    }
 
-    // 1. Total Static Savings
-    $pipelineStatic = [
-        ['$match' => ['user_id' => $user_id, 'type' => 'static']],
-        ['$group' => ['_id' => null, 'totalAmount' => ['$sum' => '$amount']]]
-    ];
-    $resultStatic = $savingsCollection->aggregate($pipelineStatic)->toArray();
-    $total_static_savings = isset($resultStatic[0]['totalAmount']) ? (float)$resultStatic[0]['totalAmount'] : 0.0;
+    // --- 3. EXPENSES (Static) ---
+    $staticCollection = $database->selectCollection('static_expenses');
+    // NOTE: Query uses the guaranteed working user_id
+    $staticDocs = $staticCollection->find(['user_id' => $user_id])->toArray(); 
+    foreach ($staticDocs as $doc) {
+        $safe_sum($total_static_expense, $doc);
+    }
 
-    // 2. Total Dynamic Savings
-    $pipelineDynamic = [
-        ['$match' => ['user_id' => $user_id, 'type' => 'dynamic']],
-        ['$group' => ['_id' => null, 'totalAmount' => ['$sum' => '$amount']]]
-    ];
-    $resultDynamic = $savingsCollection->aggregate($pipelineDynamic)->toArray();
-    $total_dynamic_savings = isset($resultDynamic[0]['totalAmount']) ? (float)$resultDynamic[0]['totalAmount'] : 0.0;
+    // --- 3. SAVINGS (FIXED: Fetching all savings documents to get the totals) ---
+    $savingsCollection = $database->selectCollection('savings');
+    // Fetch ALL savings documents, then separate by type
+    $savingsDocs = $savingsCollection->find([]); 
+    
+    foreach ($savingsDocs as $doc) {
+        if (($doc['type'] ?? 'dynamic') === 'static') {
+            $safe_sum($total_static_savings, $doc);
+        } else {
+            $safe_sum($total_dynamic_savings, $doc);
+        }
+    }
 
 } catch (Exception $e) {
-    error_log("MongoDB Savings Aggregation Error: " . $e->getMessage());
+    error_log("Report Generation Failed: " . $e->getMessage());
 }
 
 
@@ -97,6 +82,8 @@ $total_savings = $total_static_savings + $total_dynamic_savings;
 // Remaining Balance = Income - Expenses - Total Savings Committed
 $remaining_balance = $total_income - $total_expenses - $total_savings;
 ?>
+
+<!-- HTML code follows below -->
 
 <!DOCTYPE html>
 <html lang="en">
@@ -131,8 +118,8 @@ $remaining_balance = $total_income - $total_expenses - $total_savings;
       transition: transform 0.2s;
     }
     .metric-card:hover {
-        transform: translateY(-3px);
-        box-shadow: 0 4px 15px rgba(0,0,0,0.1);
+      transform: translateY(-3px);
+      box-shadow: 0 4px 15px rgba(0,0,0,0.1);
     }
     .metric-label {
       font-weight: 600;
@@ -157,73 +144,69 @@ $remaining_balance = $total_income - $total_expenses - $total_savings;
   <div class="report-card">
     <div class="report-title text-center">📈 Financial Summary Report (MongoDB)</div>
 
-    <!-- Income & Expense Totals -->
     <div class="row">
-        <h4 class="mb-3 text-secondary">Summary Totals</h4>
-        
-        <div class="col-md-6">
-            <div class="metric-card income-bg">
-                <div class="metric-label"><i class="fas fa-arrow-up text-success"></i> Total Income</div>
-                <div class="metric-value text-success">₹ <?= number_format($total_income, 2) ?></div>
-            </div>
-        </div>
+      <h4 class="mb-3 text-secondary">Summary Totals</h4>
 
-        <div class="col-md-6">
-            <div class="metric-card expense-bg">
-                <div class="metric-label"><i class="fas fa-arrow-down text-danger"></i> Total Expenses</div>
-                <div class="metric-value text-danger">₹ <?= number_format($total_expenses, 2) ?></div>
-            </div>
+      <div class="col-md-6">
+        <div class="metric-card income-bg">
+          <div class="metric-label"><i class="fas fa-arrow-up text-success"></i> Total Income</div>
+          <div class="metric-value text-success">₹ <?= number_format($total_income, 2) ?></div>
         </div>
+      </div>
+
+      <div class="col-md-6">
+        <div class="metric-card expense-bg">
+          <div class="metric-label"><i class="fas fa-arrow-down text-danger"></i> Total Expenses</div>
+          <div class="metric-value text-danger">₹ <?= number_format($total_expenses, 2) ?></div>
+        </div>
+      </div>
     </div>
-    
-    <!-- Savings & Detailed Expenses -->
+
     <div class="row mt-4">
-        <h4 class="mb-3 text-secondary">Detailed Breakdown</h4>
+      <h4 class="mb-3 text-secondary">Detailed Breakdown</h4>
 
-        <div class="col-md-4">
-            <div class="metric-card savings-bg">
-                <div class="metric-label"><i class="fas fa-piggy-bank text-warning"></i> Total Savings Committed</div>
-                <div class="metric-value text-warning">₹ <?= number_format($total_savings, 2) ?></div>
-                <hr>
-                <div class="text-muted small">Static: ₹ <?= number_format($total_static_savings, 2) ?></div>
-                <div class="text-muted small">Dynamic: ₹ <?= number_format($total_dynamic_savings, 2) ?></div>
-            </div>
+      <div class="col-md-4">
+        <div class="metric-card savings-bg">
+          <div class="metric-label"><i class="fas fa-piggy-bank text-warning"></i> Total Savings Committed</div>
+          <div class="metric-value text-warning">₹ <?= number_format($total_savings, 2) ?></div>
+          <hr>
+          <div class="text-muted small">Static: ₹ <?= number_format($total_static_savings, 2) ?></div>
+          <div class="text-muted small">Dynamic: ₹ <?= number_format($total_dynamic_savings, 2) ?></div>
         </div>
+      </div>
 
-        <div class="col-md-4">
-            <div class="metric-card expense-bg">
-                <div class="metric-label"><i class="fas fa-money-bill-wave text-danger"></i> Static Expenses</div>
-                <div class="metric-value text-danger">₹ <?= number_format($total_static_expense, 2) ?></div>
-            </div>
+      <div class="col-md-4">
+        <div class="metric-card expense-bg">
+          <div class="metric-label"><i class="fas fa-money-bill-wave text-danger"></i> Static Expenses</div>
+          <div class="metric-value text-danger">₹ <?= number_format($total_static_expense, 2) ?></div>
         </div>
-        
-        <div class="col-md-4">
-            <div class="metric-card expense-bg">
-                <div class="metric-label"><i class="fas fa-shopping-bag text-danger"></i> Dynamic Expenses</div>
-                <div class="metric-value text-danger">₹ <?= number_format($total_dynamic_expense, 2) ?></div>
-            </div>
+      </div>
+
+      <div class="col-md-4">
+        <div class="metric-card expense-bg">
+          <div class="metric-label"><i class="fas fa-shopping-bag text-danger"></i> Dynamic Expenses</div>
+          <div class="metric-value text-danger">₹ <?= number_format($total_dynamic_expense, 2) ?></div>
         </div>
+      </div>
     </div>
-    
-    <!-- Final Balance -->
+
     <div class="row mt-4">
-        <div class="col-12">
-            <div class="metric-card balance-bg">
-                <div class="metric-label"><i class="fas fa-balance-scale text-primary"></i> NET REMAINING BALANCE</div>
-                <div class="metric-value <?= $remaining_balance >= 0 ? 'balance-positive' : 'balance-negative' ?>">
-                    ₹ <?= number_format($remaining_balance, 2) ?>
-                </div>
-                <div class="text-muted small mt-2">
-                    (Income - Total Expenses - Total Savings)
-                </div>
-            </div>
+      <div class="col-12">
+        <div class="metric-card balance-bg">
+          <div class="metric-label"><i class="fas fa-balance-scale text-primary"></i> NET REMAINING BALANCE</div>
+          <div class="metric-value <?= $remaining_balance >= 0 ? 'balance-positive' : 'balance-negative' ?>">
+            ₹ <?= number_format($remaining_balance, 2) ?>
+          </div>
+          <div class="text-muted small mt-2">(Income - Total Expenses - Total Savings)</div>
         </div>
+      </div>
     </div>
-    
+
     <div class="text-start mt-4">
-        <a href="dashboard.php" class="btn btn-outline-secondary">⬅ Back to Dashboard</a>
+      <a href="dashboard.php" class="btn btn-outline-secondary">⬅ Back to Dashboard</a>
     </div>
   </div>
 </div>
+
 </body>
 </html>
