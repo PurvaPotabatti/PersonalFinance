@@ -1,73 +1,107 @@
 <?php
-// PHP Error Reporting (for debugging only, remove these lines later)
-ini_set('display_errors', 1);
-ini_set('display_startup_errors', 1);
-error_reporting(E_ALL);
-
-// --- INITIALIZATION ---
+session_start();
+// Load Composer dependencies
+require __DIR__ . '/vendor/autoload.php';
+// Include the local connection core
 require_once __DIR__ . '/DB.php'; 
 use MongoDB\BSON\UTCDateTime; 
 use MongoDB\BSON\ObjectId; 
 
+// --- INITIALIZATION ---
 $database = DB::getDatabase(); 
-$staticCollection = $database->static_expenses;
-$dynamicCollection = $database->dynamic_expenses;
+$expensesCollection = $database->selectCollection('expenses'); 
 
 $message = ''; 
-$user_id = 58063; // Placeholder user ID
+$user_id = (int)($_SESSION['user_id'] ?? 0); 
 
-// --- CRUD OPERATIONS (Handling POST Requests) ---
-if ($_SERVER["REQUEST_METHOD"] == "POST" && isset($_POST['submit_expense'])) {
-    
-    $type = $_POST['expense_type'] ?? 'dynamic'; 
-    $name = htmlspecialchars(trim($_POST['expense_name'])); 
-    $amount = filter_input(INPUT_POST, 'amount', FILTER_VALIDATE_FLOAT);
-    $notes = htmlspecialchars(trim($_POST['notes']));
-
-    // 1. Determine the destination collection
-    $targetCollection = ($type === 'static') ? $staticCollection : $dynamicCollection;
-
-    if ($amount > 0 && !empty($name)) { 
-        
-        $expenseDocument = [
-            'user_id' => $user_id,
-            'amount' => $amount,
-            'name' => $name,      
-            'notes' => $notes,    
-            'created_at' => new UTCDateTime(), 
-        ];
-
-        try {
-            $targetCollection->insertOne($expenseDocument);
-            $message = ucfirst($type) . " expense of **₹" . number_format($amount, 2) . "** recorded successfully!";
-            header("Location: expense.php");
-            exit();
-        } 
-        catch (Exception $e) { 
-            $message = "Failed to record expense: " . $e->getMessage();
-        } 
-    } else { 
-        $message = "Please enter a valid amount and expense name.";
-    }
-} 
-
-
-// --- READ OPERATIONS (Fetch Data for Tables) ---
-$allStaticDocs = $staticCollection->find(['user_id' => $user_id]);
-$allDynamicDocs = $dynamicCollection->find(['user_id' => $user_id]);
-
-// Labels and arrays updated to Static/Dynamic
-$staticExpenses = iterator_to_array($allStaticDocs);
-$dynamicExpenses = iterator_to_array($allDynamicDocs); 
+// Initialize ALL display variables
+$staticExpenses = [];
+$dynamicExpenses = [];
 $total_static = 0.00; 
 $total_dynamic = 0.00; 
 
-foreach ($staticExpenses as $doc) {
-    $total_static += floatval($doc['amount'] ?? 0); 
+
+// --- CRUD OPERATIONS (Handling POST Requests) ---
+if ($_SERVER["REQUEST_METHOD"] == "POST") {
+    
+    $action = $_POST['action'] ?? (isset($_POST['submit_expense']) ? 'add' : null);
+
+    if ($action === 'add') {
+        $type = $_POST['expense_type'] ?? 'dynamic'; 
+        $name = htmlspecialchars(trim($_POST['expense_name'] ?? ''));
+        $amount = filter_input(INPUT_POST, 'amount', FILTER_VALIDATE_FLOAT);
+        $notes = htmlspecialchars(trim($_POST['notes'] ?? ''));
+
+        if ($amount > 0 && !empty($name)) { 
+            
+            $expenseDocument = [
+                'user_id' => $user_id,
+                'type' => $type,
+                'name' => $name,
+                'amount' => $amount,
+                'notes' => $notes,
+                'created_at' => new UTCDateTime()
+            ];
+
+            try {
+                $expensesCollection->insertOne($expenseDocument);
+                
+                // CRITICAL FIX: Set success message in session for redirect
+                $_SESSION['message'] = ucfirst($type) . " expense of **₹" . number_format($amount, 2) . "** recorded successfully!";
+                header("Location: expense.php");
+                exit();
+            } 
+            catch (Exception $e) { 
+                $message = "Failed to record expense: " . $e->getMessage();
+            } 
+        } else { 
+            $message = "Error: Invalid name or amount.";
+        }
+    } 
+    elseif ($action === 'delete' && isset($_POST['id'])) {
+        $id = $_POST['id'];
+        
+        try {
+            $expensesCollection->deleteOne([
+                '_id' => new ObjectId($id),
+                'user_id' => $user_id 
+            ]);
+            $_SESSION['message'] = "Expense record deleted successfully.";
+        } catch (Exception $e) {
+            $_SESSION['message'] = "Deletion failed: " . $e->getMessage();
+        }
+        
+        // CRITICAL FIX: Redirect after delete
+        header("Location: expense.php");
+        exit();
+    }
+} 
+
+// CRITICAL FIX: Check for and display messages after redirect
+if (isset($_SESSION['message'])) {
+    $message = $_SESSION['message'];
+    unset($_SESSION['message']); // Clear the message after displaying it once
 }
 
-foreach ($dynamicExpenses as $doc) {
-    $total_dynamic += floatval($doc['amount'] ?? 0); 
+
+// --- READ OPERATION (Fetch Data for Tables) ---
+try {
+    $allUserExpenses = $expensesCollection->find(['user_id' => $user_id])->toArray();
+
+    // Separate into static and dynamic expenses for display
+    foreach ($allUserExpenses as $doc) {
+        $amount = floatval($doc['amount'] ?? 0); 
+        
+        if (($doc['type'] ?? 'dynamic') === 'static') {
+            $staticExpenses[] = $doc;
+            $total_static += $amount;
+        } else {
+            $dynamicExpenses[] = $doc;
+            $total_dynamic += $amount;
+        }
+    }
+} catch (Exception $e) {
+    error_log("Database Fetch Error: " . $e->getMessage());
 }
 ?>
 

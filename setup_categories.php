@@ -6,44 +6,59 @@ use MongoDB\BSON\UTCDateTime;
 
 // --- CONFIGURATION ---
 $database = DB::getDatabase();
-$staticCollection = $database->static_expenses;
-$user_id = 58063; // Use the placeholder ID you used previously
+// FIX: Target the new, single 'expenses' collection
+$expensesCollection = $database->selectCollection('expenses');
+$user_id = 58063; // Placeholder user ID
 
-// 1. Define the documents to insert, including all required SQL fields: user_id, name, amount, created_at
-$categories = [
+// 1. Define the documents to insert, including all required SQL fields: 
+// user_id, type, name, amount, created_at
+$initial_expenses = [
+    // STATIC EXPENSES (Type: 'static')
     [
         'user_id' => $user_id,
+        'type' => 'static', // Matches SQL 'type' column
         'name' => 'Rent/Mortgage', 
-        'amount' => 15000.00, // Example fixed cost
+        'amount' => 15000.00, 
         'created_at' => new UTCDateTime()
     ],
     [
         'user_id' => $user_id,
+        'type' => 'static',
         'name' => 'Car Payment', 
         'amount' => 5000.00, 
         'created_at' => new UTCDateTime()
     ],
     [
         'user_id' => $user_id,
+        'type' => 'static',
         'name' => 'Insurance', 
         'amount' => 1200.00, 
         'created_at' => new UTCDateTime()
     ],
+    // DYNAMIC EXPENSES (Type: 'dynamic')
     [
         'user_id' => $user_id,
-        'name' => 'Utilities', 
+        'type' => 'dynamic', // Matches SQL 'type' column
+        'name' => 'Groceries', 
         'amount' => 3000.00, 
+        'created_at' => new UTCDateTime()
+    ],
+    [
+        'user_id' => $user_id,
+        'type' => 'dynamic',
+        'name' => 'Coffee & Lunch', 
+        'amount' => 500.00, 
         'created_at' => new UTCDateTime()
     ],
 ];
 
 // 2. Perform insertion only if the collection is empty
 try {
-    if ($staticCollection->countDocuments() === 0) {
-        $staticCollection->insertMany($categories);
-        echo "✅ **SUCCESS:** `static_expenses` collection initialized with 4 documents!";
+    if ($expensesCollection->countDocuments() === 0) {
+        $expensesCollection->insertMany($initial_expenses);
+        echo "✅ **SUCCESS:** `expenses` collection initialized with static and dynamic documents!";
     } else {
-        echo "ℹ️ **INFO:** `static_expenses` already exists and contains data. Skipping insertion.";
+        echo "ℹ️ **INFO:** `expenses` already exists and contains data. Skipping insertion.";
     }
 } catch (Exception $e) {
     die("❌ **ERROR:** Failed to initialize collection: " . htmlspecialchars($e->getMessage()));
