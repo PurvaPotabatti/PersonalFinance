@@ -1,15 +1,16 @@
 <?php
 session_start();
 require_once __DIR__ . '/vendor/autoload.php';
-require_once __DIR__ . '/src/Database/MongoDBClient.php';
+require_once __DIR__ . '/DB.php'; // Using the simplified DB class
 
-use App\Database\MongoDBClient;
+use MongoDB\Client; // Changed to Client if DB.php is not used
+use MongoDB\BSON\ObjectId;
 
 $loginError = '';
 
 if ($_SERVER["REQUEST_METHOD"] === "POST" && isset($_POST['login'])) {
     try {
-        $collection = MongoDBClient::getCollection('user');
+        $collection = DB::getCollection('user');
 
         $email = trim($_POST['email']);
         $password = trim($_POST['password']);
@@ -17,9 +18,9 @@ if ($_SERVER["REQUEST_METHOD"] === "POST" && isset($_POST['login'])) {
         $user = $collection->findOne(['email' => $email]);
 
         if ($user) {
-            // ✅ Use password_verify for hashed passwords
             if (password_verify($password, $user['password_hash'])) {
-                $_SESSION['user_id'] = (string)$user['_id'];
+                // CORRECT: Store the MongoDB ObjectId string
+                $_SESSION['user_id'] = (string)$user['_id']; 
                 $_SESSION['user_name'] = $user['name'];
                 header("Location: dashboard.php");
                 exit();
@@ -33,7 +34,9 @@ if ($_SERVER["REQUEST_METHOD"] === "POST" && isset($_POST['login'])) {
         $loginError = "Connection failed: " . $e->getMessage();
     }
 }
+// ... (rest of HTML)
 ?>
+
 <!DOCTYPE html>
 <html lang="en">
 <head>
@@ -98,7 +101,7 @@ if ($_SERVER["REQUEST_METHOD"] === "POST" && isset($_POST['login'])) {
       </div>
     </div>
     <button class="btn btn-success w-100" type="submit" name="login">Login</button>
-    <p class="text-center mt-3">Don't have an account? <a href="frontDB.php">Register here</a></p>
+    <p class="text-center mt-3">Don't have an account? <a href="signup.php">Register here</a></p>
   </form>
 
   <?php if (!empty($loginError)): ?>

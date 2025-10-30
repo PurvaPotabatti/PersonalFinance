@@ -6,7 +6,9 @@ require __DIR__ . '/vendor/autoload.php';
 require_once __DIR__ . '/DB.php'; 
 
 // --- INITIALIZATION ---
-$user_id = (int)($_SESSION['user_id'] ?? 0); 
+//$user_id = (int)($_SESSION['user_id'] ?? 0); 
+$user_id = $_SESSION['user_id'] ?? null; // Keeps the unique MongoDB ID string
+// The query is then filtered by this unique string.
 $database = DB::getDatabase(); 
 
 // Initialize all totals to zero

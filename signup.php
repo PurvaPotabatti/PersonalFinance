@@ -87,60 +87,50 @@
   <!-- ✅ PHP Sign-up logic with MongoDB Atlas -->
   <?php
   require __DIR__ . '/vendor/autoload.php';
-  use MongoDB\Client;
-  use MongoDB\Driver\ServerApi;
-
-  // Load environment variables
-  $dotenv = Dotenv\Dotenv::createImmutable(__DIR__);
-  $dotenv->safeLoad();
-
-  $uri = $_ENV['MONGODB_URI'] ?? null;
-
-  if (!$uri) {
-      echo "<div class='alert alert-danger mt-3 text-center'>
-              ❌ MONGODB_URI not found in .env file.
-            </div>";
-      exit;
-  }
-
-  // Connect to MongoDB Atlas
-  $apiVersion = new ServerApi(ServerApi::V1);
-  $client = new Client($uri, [], ['serverApi' => $apiVersion]);
-  $db = $client->selectDatabase('finance_manager');
-  $collection = $db->selectCollection('user');
-
+  require_once __DIR__ . '/DB.php'; // Include the local connection core
+  use MongoDB\BSON\UTCDateTime;
+  
   if ($_SERVER['REQUEST_METHOD'] == 'POST' && isset($_POST['register'])) {
-      $name = trim($_POST['name']);
-      $email = trim($_POST['email']);
-      $password = password_hash(trim($_POST['password']), PASSWORD_DEFAULT);
-      $phone = trim($_POST['phone_number']);
-      $user_id = uniqid();
+      try {
+          $db = DB::getDatabase();
+          $collection = $db->selectCollection('user');
 
-      $existingUser = $collection->findOne(['email' => $email]);
+          $name = trim($_POST['name']);
+          $email = trim($_POST['email']);
+          $password = password_hash(trim($_POST['password']), PASSWORD_DEFAULT);
+          $phone = trim($_POST['phone_number']);
+          // Removed $user_id = uniqid(); - We rely on MongoDB's _id
 
-      if ($existingUser) {
-          echo "<div class='alert alert-warning mt-3 text-center'>
-                  ⚠️ Email already registered. Please <a href='login.php'>login</a>.
-                </div>";
-      } else {
-          $insertResult = $collection->insertOne([
-              'user_id' => $user_id,
-              'name' => $name,
-              'email' => $email,
-              'password_hash' => $password,
-              'phone_number' => $phone,
-              'created_at' => new MongoDB\BSON\UTCDateTime()
-          ]);
+          $existingUser = $collection->findOne(['email' => $email]);
 
-          if ($insertResult->getInsertedCount() > 0) {
-              echo "<div class='alert alert-success mt-3 text-center'>
-                      ✅ Account created successfully. <a href='login.php'>Click here to login</a>.
+          if ($existingUser) {
+              echo "<div class='alert alert-warning mt-3 text-center'>
+                      ⚠️ Email already registered. Please <a href='login.php'>login</a>.
                     </div>";
           } else {
-              echo "<div class='alert alert-danger mt-3 text-center'>
+              $insertResult = $collection->insertOne([
+                  // CRITICAL FIX: Removed redundant and confusing 'user_id' field. We use _id.
+                  'name' => $name,
+                  'email' => $email,
+                  'password_hash' => $password,
+                  'phone_number' => $phone,
+                  'created_at' => new UTCDateTime()
+              ]);
+
+              if ($insertResult->getInsertedCount() > 0) {
+                  echo "<div class='alert alert-success mt-3 text-center'>
+                      ✅ Account created successfully. <a href='login.php'>Click here to login</a>.
+                    </div>";
+              } else {
+                  echo "<div class='alert alert-danger mt-3 text-center'>
                       ❌ Something went wrong while creating the account.
                     </div>";
+              }
           }
+      } catch (Exception $e) {
+          echo "<div class='alert alert-danger mt-3 text-center'>
+                  ❌ Connection/Database Error: " . htmlspecialchars($e->getMessage()) . "
+                </div>";
       }
   }
   ?>

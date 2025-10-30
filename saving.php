@@ -8,8 +8,9 @@ use MongoDB\BSON\ObjectId;
 
 // --- INITIALIZATION ---
 // Get user ID from session. Based on the SQL dump, user_id is an integer.
-$user_id = (int)($_SESSION['user_id'] ?? 58063); // Use a realistic dummy ID for testing
-
+//$user_id = (int)($_SESSION['user_id'] ?? 58063); // Use a realistic dummy ID for testing
+$user_id = $_SESSION['user_id'] ?? null; // Keeps the unique MongoDB ID string
+// The query is then filtered by this unique string.
 // Get the MongoDB collection handler
 try {
     $savingsCollection = MongoDBClient::getCollection('savings');

@@ -12,8 +12,9 @@ $database = DB::getDatabase();
 $expensesCollection = $database->selectCollection('expenses'); 
 
 $message = ''; 
-$user_id = (int)($_SESSION['user_id'] ?? 0); 
-
+//$user_id = (int)($_SESSION['user_id'] ?? 0); 
+$user_id = $_SESSION['user_id'] ?? null; // Keeps the unique MongoDB ID string
+// The query is then filtered by this unique string.
 // Initialize ALL display variables
 $staticExpenses = [];
 $dynamicExpenses = [];
